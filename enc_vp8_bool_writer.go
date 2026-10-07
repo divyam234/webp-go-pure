@@ -4,8 +4,8 @@ import "math/bits"
 
 // vp8BoolWriter is the boolean arithmetic writer used by the lossy VP8 encoder.
 type vp8BoolWriter struct {
-	rng    int32
-	value  int32
+	rng    uint32
+	value  uint32
 	run    int
 	nbBits int32
 	bytes  []byte
@@ -54,7 +54,7 @@ func (w *vp8BoolWriter) flush() {
 
 // putBit encodes one probability-weighted bit.
 func (w *vp8BoolWriter) putBit(bit bool, prob uint8) bool {
-	split := (w.rng * int32(prob)) >> 8
+	split := (w.rng * uint32(prob)) >> 8
 	if bit {
 		w.value += split + 1
 		w.rng -= split + 1
@@ -62,7 +62,7 @@ func (w *vp8BoolWriter) putBit(bit bool, prob uint8) bool {
 		w.rng = split
 	}
 	if w.rng < 127 {
-		shift := int32(7) - int32(bits.Len32(uint32(w.rng+1))-1)
+		shift := int32(bits.LeadingZeros32(w.rng+1) - 24)
 		w.rng = ((w.rng + 1) << uint(shift)) - 1
 		w.value <<= uint(shift)
 		w.nbBits += shift

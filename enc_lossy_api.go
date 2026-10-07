@@ -32,12 +32,17 @@ func elossyBuildCandidateVp8Frame(width, height, mbWidth, mbHeight int, candidat
 }
 
 // elossyRunCandidatePass searches one candidate under the given probability
-// table and returns the resulting candidate alongside the table the emitted
-// tokens imply.
-func elossyRunCandidatePass(scratch *elossyEncodeScratch, width, height int, source *elossyPlanes, mbWidth, mbHeight int, profile *elossyLossySearchProfile, segment *elossySegmentConfig, segmentQuants *[numMbSegments]elossyQuantMatrices, table *elossyCoeffProbTables, coverage elossyPassCoverage) (elossyEncodedLossyCandidate, elossyCoeffProbTables) {
-	var stats elossyCoeffStats
+// table. A pass either emits its token partition or, for the cheap convergence
+// pass, records coefficient statistics. No caller consumes both products.
+func elossyRunCandidatePass(scratch *elossyEncodeScratch, width, height int, source *elossyPlanes, mbWidth, mbHeight int, profile *elossyLossySearchProfile, segment *elossySegmentConfig, segmentQuants *[numMbSegments]elossyQuantMatrices, table *elossyCoeffProbTables, coverage elossyPassCoverage, collectStats bool) (elossyEncodedLossyCandidate, elossyCoeffProbTables) {
+	var stats *elossyCoeffStats
+	var collected elossyCoeffStats
+	if collectStats {
+		stats = &collected
+	}
+
 	buffers := scratch.acquire()
-	elossyEncodeTokenPartition(scratch, buffers, source, profile, segment, segmentQuants, table, &stats, coverage)
+	elossyEncodeTokenPartition(scratch, buffers, source, profile, segment, segmentQuants, table, stats, coverage)
 	// A limited pass only reconstructs its prefix, so the rest of the plane is
 	// still blank and scoring it would swamp the distortion with the untouched
 	// remainder.
@@ -50,6 +55,11 @@ func elossyRunCandidatePass(scratch *elossyEncodeScratch, width, height int, sou
 		// skips still hold the source it seeded them with.
 		sseHeight = 0
 	}
+
+	var nextTable elossyCoeffProbTables
+	if collectStats {
+		nextTable = elossyFinalizeTokenProbabilities(&collected)
+	}
 	return elossyEncodedLossyCandidate{
 		baseQuant:      segment.quantizer[0],
 		segment:        *segment,
@@ -59,7 +69,7 @@ func elossyRunCandidatePass(scratch *elossyEncodeScratch, width, height int, sou
 		distortion:     elossyReconstructionSse(source, &buffers.reconstructed, width, sseHeight),
 		reconstructed:  buffers.reconstructed,
 		buffers:        buffers,
-	}, elossyFinalizeTokenProbabilities(&stats)
+	}, nextTable
 }
 
 // elossyEncodeLossyCandidate encodes one lossy candidate and captures its token
@@ -70,7 +80,7 @@ func elossyEncodeLossyCandidate(scratch *elossyEncodeScratch, width, height int,
 	segmentQuants := elossyBuildSegmentQuantizers(segment)
 
 	if !profile.updateProbabilities {
-		candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, segment, &segmentQuants, &elossyCoeffsProba0, elossyFullCoverage())
+		candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, segment, &segmentQuants, &elossyCoeffsProba0, elossyFullCoverage(), false)
 		candidate.probabilities = coeffsProba0
 		return candidate, nil
 	}
@@ -87,11 +97,11 @@ func elossyEncodeLossyCandidate(scratch *elossyEncodeScratch, width, height int,
 	} else {
 		priorProfile := elossyStatsProfile(profile)
 		var prior elossyEncodedLossyCandidate
-		prior, table = elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, &priorProfile, segment, &segmentQuants, &elossyCoeffsProba0, elossyStatsCoverage(mbWidth, mbHeight))
+		prior, table = elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, &priorProfile, segment, &segmentQuants, &elossyCoeffsProba0, elossyStatsCoverage(mbWidth, mbHeight), true)
 		scratch.release(prior.buffers)
 	}
 
-	candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, segment, &segmentQuants, &table, elossyFullCoverage())
+	candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, segment, &segmentQuants, &table, elossyFullCoverage(), false)
 	return candidate, nil
 }
 
@@ -173,7 +183,7 @@ func elossyShortlistCandidates(scratch *elossyEncodeScratch, source *elossyPlane
 	scored := make([]ranked, 0, len(candidates))
 	for i := range candidates {
 		segmentQuants := elossyBuildSegmentQuantizers(&candidates[i])
-		candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, &candidates[i], &segmentQuants, &elossyCoeffsProba0, elossyPrefixCoverage(limit))
+		candidate, _ := elossyRunCandidatePass(scratch, width, height, source, mbWidth, mbHeight, profile, &candidates[i], &segmentQuants, &elossyCoeffsProba0, elossyPrefixCoverage(limit), false)
 		scored = append(scored, ranked{
 			index: i,
 			cost:  elossyFrameRdCost(candidate.distortion, len(candidate.tokenPartition), baseQuant),

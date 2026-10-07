@@ -974,10 +974,13 @@ func elossyFinalizeMacroblock(out *elossyMacroblockCoeffs, model *elossyRateMode
 }
 
 // elossyEmitMacroblockTokens writes one macroblock's coefficient tokens and
-// advances the non-zero contexts. It depends on the probability table only
-// through the arithmetic coder, so it can be replayed under a re-estimated
-// table without repeating the search.
+// advances the non-zero contexts. The statistics-only convergence pass takes
+// the separate path below so ordinary token emission never pays stats work.
 func elossyEmitMacroblockTokens(writer *vp8BoolWriter, probabilities *elossyCoeffProbTables, coeffs *elossyMacroblockCoeffs, top *elossyNonZeroContext, left *elossyNonZeroContext, stats *elossyCoeffStats) bool {
+	if stats != nil {
+		return elossyRecordMacroblockTokenStats(stats, coeffs, top, left)
+	}
+
 	isI4x4 := coeffs.isI4x4
 	yLevels := &coeffs.y
 	y2Levels := &coeffs.y2
@@ -999,13 +1002,7 @@ func elossyEmitMacroblockTokens(writer *vp8BoolWriter, probabilities *elossyCoef
 		coeffType, first = 3, 0
 	} else {
 		ctx := int(top.nzDc + left.nzDc)
-		var hasY2 bool
-		if stats != nil {
-			elossyRecordCoefficientsStats(stats, 1, ctx, 0, y2Levels)
-			hasY2 = elossyEncodeCoefficients(writer, probabilities, 1, ctx, 0, y2Levels)
-		} else {
-			hasY2 = elossyEncodeCoefficients(writer, probabilities, 1, ctx, 0, y2Levels)
-		}
+		hasY2 := elossyEncodeCoefficients(writer, probabilities, 1, ctx, 0, y2Levels)
 		nzDc := uint8(0)
 		if hasY2 {
 			nzDc = 1
@@ -1022,13 +1019,7 @@ func elossyEmitMacroblockTokens(writer *vp8BoolWriter, probabilities *elossyCoef
 		for subX := 0; subX < 4; subX++ {
 			block := subY*4 + subX
 			ctx := int(l + (tnz & 1))
-			var hasAc bool
-			if stats != nil {
-				elossyRecordCoefficientsStats(stats, coeffType, ctx, first, &yLevels[block])
-				hasAc = elossyEncodeCoefficients(writer, probabilities, coeffType, ctx, first, &yLevels[block])
-			} else {
-				hasAc = elossyEncodeCoefficients(writer, probabilities, coeffType, ctx, first, &yLevels[block])
-			}
+			hasAc := elossyEncodeCoefficients(writer, probabilities, coeffType, ctx, first, &yLevels[block])
 			l = 0
 			if hasAc {
 				l = 1
@@ -1048,13 +1039,7 @@ func elossyEmitMacroblockTokens(writer *vp8BoolWriter, probabilities *elossyCoef
 		for subX := 0; subX < 2; subX++ {
 			block := subY*2 + subX
 			ctx := int(l + (tnzU & 1))
-			var encoded bool
-			if stats != nil {
-				elossyRecordCoefficientsStats(stats, 2, ctx, 0, &uLevels[block])
-				encoded = elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &uLevels[block])
-			} else {
-				encoded = elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &uLevels[block])
-			}
+			encoded := elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &uLevels[block])
 			hasCoeffs := uint8(0)
 			if encoded {
 				hasCoeffs = 1
@@ -1075,13 +1060,106 @@ func elossyEmitMacroblockTokens(writer *vp8BoolWriter, probabilities *elossyCoef
 		for subX := 0; subX < 2; subX++ {
 			block := subY*2 + subX
 			ctx := int(l + (tnzV & 1))
-			var encoded bool
-			if stats != nil {
-				elossyRecordCoefficientsStats(stats, 2, ctx, 0, &vLevels[block])
-				encoded = elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &vLevels[block])
-			} else {
-				encoded = elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &vLevels[block])
+			encoded := elossyEncodeCoefficients(writer, probabilities, 2, ctx, 0, &vLevels[block])
+			hasCoeffs := uint8(0)
+			if encoded {
+				hasCoeffs = 1
 			}
+			l = hasCoeffs
+			tnzV = (tnzV >> 1) | (hasCoeffs << 3)
+		}
+		tnzV >>= 2
+		lnzV = (lnzV >> 1) | (l << 5)
+	}
+	outTNz |= (tnzV << 4) << 2
+	outLNz |= (lnzV & 0xf0) << 2
+
+	top.nz = outTNz
+	left.nz = outLNz
+	return false
+}
+
+func elossyRecordMacroblockTokenStats(stats *elossyCoeffStats, coeffs *elossyMacroblockCoeffs, top *elossyNonZeroContext, left *elossyNonZeroContext) bool {
+	isI4x4 := coeffs.isI4x4
+	yLevels := &coeffs.y
+	y2Levels := &coeffs.y2
+	uLevels := &coeffs.u
+	vLevels := &coeffs.v
+
+	if coeffs.skip {
+		top.nz = 0
+		left.nz = 0
+		if !isI4x4 {
+			top.nzDc = 0
+			left.nzDc = 0
+		}
+		return true
+	}
+
+	var coeffType, first int
+	if isI4x4 {
+		coeffType, first = 3, 0
+	} else {
+		ctx := int(top.nzDc + left.nzDc)
+		hasY2 := elossyRecordCoefficientsStats(stats, 1, ctx, 0, y2Levels)
+		nzDc := uint8(0)
+		if hasY2 {
+			nzDc = 1
+		}
+		top.nzDc = nzDc
+		left.nzDc = nzDc
+		coeffType, first = 0, 1
+	}
+
+	tnz := top.nz & 0x0f
+	lnz := left.nz & 0x0f
+	for subY := 0; subY < 4; subY++ {
+		l := lnz & 1
+		for subX := 0; subX < 4; subX++ {
+			block := subY*4 + subX
+			ctx := int(l + (tnz & 1))
+			hasAc := elossyRecordCoefficientsStats(stats, coeffType, ctx, first, &yLevels[block])
+			l = 0
+			if hasAc {
+				l = 1
+			}
+			tnz = (tnz >> 1) | (l << 7)
+		}
+		tnz >>= 4
+		lnz = (lnz >> 1) | (l << 7)
+	}
+	outTNz := tnz
+	outLNz := lnz >> 4
+
+	tnzU := top.nz >> 4
+	lnzU := left.nz >> 4
+	for subY := 0; subY < 2; subY++ {
+		l := lnzU & 1
+		for subX := 0; subX < 2; subX++ {
+			block := subY*2 + subX
+			ctx := int(l + (tnzU & 1))
+			encoded := elossyRecordCoefficientsStats(stats, 2, ctx, 0, &uLevels[block])
+			hasCoeffs := uint8(0)
+			if encoded {
+				hasCoeffs = 1
+			}
+			l = hasCoeffs
+			tnzU = (tnzU >> 1) | (hasCoeffs << 3)
+		}
+		tnzU >>= 2
+		lnzU = (lnzU >> 1) | (l << 5)
+	}
+	outTNz |= tnzU << 4
+	outLNz |= lnzU & 0xf0
+
+	tnzV := top.nz >> 6
+	lnzV := left.nz >> 6
+	for subY := 0; subY < 2; subY++ {
+		l := lnzV & 1
+		for subX := 0; subX < 2; subX++ {
+			block := subY*2 + subX
+			ctx := int(l + (tnzV & 1))
+			encoded := elossyRecordCoefficientsStats(stats, 2, ctx, 0, &vLevels[block])
 			hasCoeffs := uint8(0)
 			if encoded {
 				hasCoeffs = 1
@@ -1164,7 +1242,9 @@ func (s *elossyEncodeScratch) release(buffers *elossyPassBuffers) {
 func elossyEncodeTokenPartition(scratch *elossyEncodeScratch, buffers *elossyPassBuffers, source *elossyPlanes, profile *elossyLossySearchProfile, segment *elossySegmentConfig, segmentQuants *[numMbSegments]elossyQuantMatrices, probabilities *elossyCoeffProbTables, stats *elossyCoeffStats, coverage elossyPassCoverage) {
 	mbWidth, mbHeight := scratch.mbWidth, scratch.mbHeight
 	var writer vp8BoolWriter
-	writer.reset(buffers.partition)
+	if stats == nil {
+		writer.reset(buffers.partition)
+	}
 	reconstructed := &buffers.reconstructed
 	topContexts := scratch.topContexts
 	topModes := scratch.topModes
@@ -1214,6 +1294,10 @@ func elossyEncodeTokenPartition(scratch *elossyEncodeScratch, buffers *elossyPas
 		}
 	}
 
-	buffers.partition = writer.finish()
+	if stats == nil {
+		buffers.partition = writer.finish()
+	} else {
+		buffers.partition = buffers.partition[:0]
+	}
 	buffers.modes = modes
 }

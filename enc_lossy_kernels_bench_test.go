@@ -76,3 +76,21 @@ func BenchmarkRgbaToYuv420(b *testing.B) {
 	}
 	b.SetBytes(int64(width * height * 4))
 }
+
+func BenchmarkFillLuma4PredictionFrom(b *testing.B) {
+	neighbors := elossyLuma4Neighbors{
+		topLeft: 117,
+		top:     [8]uint8{13, 47, 89, 131, 173, 211, 239, 251},
+		left:    [4]uint8{29, 83, 149, 227},
+	}
+	modes := [numBModes]uint8{
+		bDCPred, bTMPred, bVEPred, bHEPred, bRDPred, bVRPred, bLDPred, bVLPred,
+		bHDPred, bHUPred,
+	}
+	var out [16]uint8
+	for i := 0; i < b.N; i++ {
+		for _, mode := range modes {
+			elossyFillLuma4PredictionFrom(&neighbors, mode, out[:], 4)
+		}
+	}
+}

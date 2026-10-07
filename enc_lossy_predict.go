@@ -501,6 +501,10 @@ func elossyFillLuma4PredictionFrom(neighbors *elossyLuma4Neighbors, mode uint8, 
 		panic("unsupported 4x4 prediction mode")
 	}
 
+	if outStride == 4 {
+		copy(out[:16], block[:])
+		return
+	}
 	for row := 0; row < 4; row++ {
 		src := row * 4
 		dst := row * outStride
